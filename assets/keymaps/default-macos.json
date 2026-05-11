@@ -150,6 +150,7 @@
       "cmd-\"": "editor::ExpandAllDiffHunks",
       "cmd-alt-g b": "git::Blame",
       "cmd-alt-g m": "git::OpenModifiedFiles",
+      "cmd-alt-g p": "pull_request_panel::Open",
       "cmd-alt-g r": "git::ReviewDiff",
       "cmd-i": "editor::ShowSignatureHelp",
       "f9": "editor::ToggleBreakpoint",
@@ -1037,6 +1038,20 @@
     "bindings": {
       "cmd-1": "git_panel::ActivateChangesTab",
       "cmd-2": "git_panel::ActivateHistoryTab",
+    },
+  },
+  {
+    "context": "GitPanel && PullRequestFiles && ChangesList",
+    "use_key_equivalents": true,
+    "bindings": {
+      "space": "pull_request_panel::ToggleViewed",
+    },
+  },
+  {
+    "context": "PullRequestPanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-r": "pull_request_panel::Refresh",
     },
   },
   {

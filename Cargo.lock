@@ -7353,6 +7353,7 @@ dependencies = [
  "serde_json",
  "settings",
  "smallvec",
+ "smol",
  "strum 0.27.2",
  "sysinfo 0.37.2",
  "task",
