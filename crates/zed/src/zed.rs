@@ -32,8 +32,8 @@ use fs::Fs;
 use futures::FutureExt as _;
 use futures::{StreamExt, channel::mpsc, select_biased};
 use git_ui::commit_view::CommitViewToolbar;
-use git_ui::git_panel::GitPanel;
 use git_ui::project_diff::{BranchDiffToolbar, ProjectDiffToolbar};
+use git_ui::{git_panel::GitPanel, pull_request_panel::PullRequestPanel};
 use gpui::{
     Action, App, AppContext as _, AsyncWindowContext, ClipboardItem, Context, DismissEvent,
     Element, Entity, FocusHandle, Focusable, Image, ImageFormat, KeyBinding, ParentElement,
@@ -727,6 +727,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
+        let pull_request_panel = PullRequestPanel::load(workspace_handle.clone(), cx.clone());
         let channels_panel =
             collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
@@ -751,6 +752,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(pull_request_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
             initialize_agent_panel(workspace_handle, cx.clone()).map(|r| r.log_err()),

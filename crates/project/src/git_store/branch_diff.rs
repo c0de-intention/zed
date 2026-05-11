@@ -18,7 +18,7 @@ use ztracing::instrument;
 
 use crate::{
     Project,
-    git_store::{GitStoreEvent, Repository, RepositoryEvent},
+    git_store::{GitStoreEvent, Repository, RepositoryEvent, StatusEntry},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -332,6 +332,55 @@ impl BranchDiff {
     }
 
     #[instrument(skip_all)]
+    pub fn entries(&self, cx: &App) -> Vec<StatusEntry> {
+        let mut output = Vec::default();
+        let Some(repo) = self.repo.clone() else {
+            return output;
+        };
+
+        let repo = repo.read(cx);
+        let mut seen = HashSet::default();
+
+        for item in repo.cached_status() {
+            seen.insert(item.repo_path.clone());
+            let branch_diff = self
+                .tree_diff
+                .as_ref()
+                .and_then(|tree_diff| tree_diff.entries.get(&item.repo_path));
+            let Some(status) = self.merge_statuses(Some(item.status), branch_diff) else {
+                continue;
+            };
+            if !status.has_changes() {
+                continue;
+            }
+
+            output.push(StatusEntry {
+                repo_path: item.repo_path,
+                status,
+                diff_stat: item.diff_stat,
+            });
+        }
+
+        let Some(tree_diff) = self.tree_diff.as_ref() else {
+            return output;
+        };
+
+        for (path, branch_diff) in tree_diff.entries.iter() {
+            if seen.contains(path) {
+                continue;
+            }
+
+            output.push(StatusEntry {
+                repo_path: path.clone(),
+                status: diff_status_to_file_status(branch_diff),
+                diff_stat: None,
+            });
+        }
+
+        output
+    }
+
+    #[instrument(skip_all)]
     pub fn load_buffers(&mut self, cx: &mut Context<Self>) -> Vec<DiffBuffer> {
         let mut output = Vec::default();
         let Some(repo) = self.repo.clone() else {
@@ -364,7 +413,18 @@ impl BranchDiff {
                 else {
                     continue;
                 };
-                let task = Self::load_buffer(branch_diff, project_path, repo.clone(), cx);
+                let fallback_to_uncommitted_diff = item.status.has_changes()
+                    && matches!(
+                        branch_diff,
+                        Some(git::status::TreeDiffStatus::Modified { .. })
+                    );
+                let task = Self::load_buffer(
+                    branch_diff,
+                    fallback_to_uncommitted_diff,
+                    project_path,
+                    repo.clone(),
+                    cx,
+                );
 
                 output.push(DiffBuffer {
                     repo_path: item.repo_path.clone(),
@@ -384,8 +444,13 @@ impl BranchDiff {
                 let Some(project_path) = repo.read(cx).repo_path_to_project_path(&path, cx) else {
                     continue;
                 };
-                let task =
-                    Self::load_buffer(Some(branch_diff.clone()), project_path, repo.clone(), cx);
+                let task = Self::load_buffer(
+                    Some(branch_diff.clone()),
+                    false,
+                    project_path,
+                    repo.clone(),
+                    cx,
+                );
 
                 let file_status = diff_status_to_file_status(branch_diff);
 
@@ -402,6 +467,7 @@ impl BranchDiff {
     #[instrument(skip_all)]
     fn load_buffer(
         branch_diff: Option<git::status::TreeDiffStatus>,
+        fallback_to_uncommitted_diff: bool,
         project_path: crate::ProjectPath,
         repo: Entity<Repository>,
         cx: &Context<'_, Project>,
@@ -430,6 +496,20 @@ impl BranchDiff {
                         project.open_uncommitted_diff(buffer.clone(), cx)
                     })?
                     .await?
+            };
+            let changes = if fallback_to_uncommitted_diff {
+                let is_empty = changes.update(cx, |changes, cx| changes.snapshot(cx).is_empty());
+                if is_empty {
+                    project
+                        .update(cx, |project, cx| {
+                            project.open_uncommitted_diff(buffer.clone(), cx)
+                        })?
+                        .await?
+                } else {
+                    changes
+                }
+            } else {
+                changes
             };
             Ok((buffer, changes))
         });

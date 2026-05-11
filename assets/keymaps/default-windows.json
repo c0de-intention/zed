@@ -122,6 +122,7 @@
       "ctrl-i": "editor::ShowSignatureHelp",
       "alt-g b": "git::Blame",
       "alt-g m": "git::OpenModifiedFiles",
+      "alt-g p": "pull_request_panel::Open",
       "alt-g r": "git::ReviewDiff",
       "menu": "editor::OpenContextMenu",
       "shift-f10": "editor::OpenContextMenu",
@@ -978,6 +979,18 @@
     "bindings": {
       "ctrl-1": "git_panel::ActivateChangesTab",
       "ctrl-2": "git_panel::ActivateHistoryTab",
+    },
+  },
+  {
+    "context": "GitPanel && PullRequestFiles && ChangesList",
+    "bindings": {
+      "space": "pull_request_panel::ToggleViewed",
+    },
+  },
+  {
+    "context": "PullRequestPanel",
+    "bindings": {
+      "ctrl-r": "pull_request_panel::Refresh",
     },
   },
   {
