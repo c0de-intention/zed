@@ -3,6 +3,7 @@ use crate::{
     conflict_view::ConflictAddon,
     git_panel::{GitPanel, GitPanelAddon, GitStatusEntry},
     git_panel_settings::GitPanelSettings,
+    pull_request_panel::{PullRequestPanel, ToggleViewed},
 };
 use agent_settings::AgentSettings;
 use anyhow::{Context as _, Result, anyhow};
@@ -23,7 +24,7 @@ use git::{
 };
 use gpui::{
     Action, AnyElement, App, AppContext as _, AsyncWindowContext, Entity, EventEmitter,
-    FocusHandle, Focusable, Render, Subscription, Task, WeakEntity, actions,
+    FocusHandle, Focusable, KeyContext, Render, Subscription, Task, WeakEntity, actions,
 };
 use language::{Anchor, Buffer, BufferId, Capability, OffsetRangeExt};
 use multi_buffer::{MultiBuffer, PathKey};
@@ -508,12 +509,12 @@ impl ProjectDiff {
         entry: GitStatusEntry,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(git_repo) = self.branch_diff.read(cx).repo() else {
-            return;
+            return false;
         };
         let repo = git_repo.read(cx);
-        let sort_prefix = sort_prefix(repo, &entry.repo_path, entry.status, cx);
+        let sort_prefix = sort_prefix(self.diff_base(cx), repo, &entry.repo_path, entry.status, cx);
         let path_key = PathKey::with_sort_prefix(sort_prefix, entry.repo_path.as_ref().clone());
 
         self.move_to_path(path_key, window, cx)
@@ -539,9 +540,69 @@ impl ProjectDiff {
             .status_for_path(&repo_path)
             .map(|entry| entry.status)
             .unwrap_or(FileStatus::Untracked);
-        let sort_prefix = sort_prefix(&git_repo.read(cx), &repo_path, status, cx);
+        let sort_prefix = sort_prefix(
+            self.diff_base(cx),
+            &git_repo.read(cx),
+            &repo_path,
+            status,
+            cx,
+        );
         let path_key = PathKey::with_sort_prefix(sort_prefix, repo_path.as_ref().clone());
-        self.move_to_path(path_key, window, cx)
+        self.move_to_path(path_key, window, cx);
+    }
+
+    pub fn active_path(&self, cx: &App) -> Option<ProjectPath> {
+        let editor = self.editor.read(cx).focused_editor().read(cx);
+        let multibuffer = editor.buffer().read(cx);
+        let position = editor.selections.newest_anchor().head();
+        let snapshot = multibuffer.snapshot(cx);
+        let (text_anchor, _) = snapshot.anchor_to_buffer_anchor(position)?;
+        let buffer = multibuffer.buffer(text_anchor.buffer_id)?;
+
+        let file = buffer.read(cx).file()?;
+        Some(ProjectPath {
+            worktree_id: file.worktree_id(cx),
+            path: file.path().clone(),
+        })
+    }
+
+    fn toggle_viewed_for_active_path(
+        &mut self,
+        _: &ToggleViewed,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.diff_base(cx), DiffBase::Merge { .. }) {
+            return;
+        }
+
+        let Some(project_path) = self.active_path(cx) else {
+            return;
+        };
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(pull_request_panel) = workspace.read(cx).panel::<PullRequestPanel>(cx) else {
+            workspace.update(cx, |workspace, cx| {
+                workspace.show_error(
+                    &anyhow!("Open the pull request panel before toggling viewed files"),
+                    cx,
+                );
+            });
+            return;
+        };
+
+        let toggled = pull_request_panel.update(cx, |panel, cx| {
+            panel.toggle_viewed_for_project_path(&project_path, window, cx)
+        });
+        if !toggled {
+            workspace.update(cx, |workspace, cx| {
+                workspace.show_error(
+                    &anyhow!("Could not find the active diff file in the pull request panel"),
+                    cx,
+                );
+            });
+        }
     }
 
     fn move_to_beginning(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -554,7 +615,12 @@ impl ProjectDiff {
         });
     }
 
-    fn move_to_path(&mut self, path_key: PathKey, window: &mut Window, cx: &mut Context<Self>) {
+    fn move_to_path(
+        &mut self,
+        path_key: PathKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if let Some(position) = self.multibuffer.read(cx).location_for_path(&path_key, cx) {
             self.editor.update(cx, |editor, cx| {
                 editor.rhs_editor().update(cx, |editor, cx| {
@@ -568,8 +634,10 @@ impl ProjectDiff {
                     )
                 })
             });
+            true
         } else {
             self.pending_scroll = Some(path_key);
+            false
         }
     }
 
@@ -825,7 +893,13 @@ impl ProjectDiff {
 
                 path_keys = Vec::with_capacity(buffers_to_load.len());
                 for entry in buffers_to_load.iter() {
-                    let sort_prefix = sort_prefix(&repo, &entry.repo_path, entry.file_status, cx);
+                    let sort_prefix = sort_prefix(
+                        this.diff_base(cx),
+                        &repo,
+                        &entry.repo_path,
+                        entry.file_status,
+                        cx,
+                    );
                     let path_key =
                         PathKey::with_sort_prefix(sort_prefix, entry.repo_path.as_ref().clone());
                     previous_buffers.remove(&path_key);
@@ -931,10 +1005,16 @@ impl ProjectDiff {
     }
 }
 
-fn sort_prefix(repo: &Repository, repo_path: &RepoPath, status: FileStatus, cx: &App) -> u64 {
+fn sort_prefix(
+    diff_base: &DiffBase,
+    repo: &Repository,
+    repo_path: &RepoPath,
+    status: FileStatus,
+    cx: &App,
+) -> u64 {
     let settings = GitPanelSettings::get_global(cx);
 
-    if settings.sort_by_path && !settings.tree_view {
+    if settings.sort_by_path && !settings.tree_view || matches!(diff_base, DiffBase::Merge { .. }) {
         TRACKED_SORT_PREFIX
     } else if repo.had_conflict_on_last_merge_head_change(repo_path) {
         CONFLICT_SORT_PREFIX
@@ -1166,12 +1246,18 @@ impl Render for ProjectDiff {
         let is_loading = self.branch_diff.read(cx).is_tree_base_loading() || !self._task.is_ready();
 
         let is_branch_diff_view = matches!(self.diff_base(cx), DiffBase::Merge { .. });
+        let mut key_context = KeyContext::new_with_defaults();
+        key_context.add(if is_empty { "EmptyPane" } else { "GitDiff" });
+        if is_branch_diff_view {
+            key_context.add("PullRequestFiles");
+        }
 
         div()
             .track_focus(&self.focus_handle)
-            .key_context(if is_empty { "EmptyPane" } else { "GitDiff" })
+            .key_context(key_context)
             .when(is_branch_diff_view, |this| {
                 this.on_action(cx.listener(Self::review_diff))
+                    .on_action(cx.listener(Self::toggle_viewed_for_active_path))
             })
             .bg(cx.theme().colors().editor_background)
             .flex()
@@ -2673,6 +2759,7 @@ mod tests {
                 "b.txt": "new",
                 "c.txt": "in-merge-base-and-work-tree",
                 "d.txt": "created-in-head",
+                "newfile.js": "// a new file commited from master\n",
             }),
         )
         .await;
@@ -2690,7 +2777,14 @@ mod tests {
 
         fs.set_head_for_repo(
             Path::new(path!("/project/.git")),
-            &[("a.txt", "B".into()), ("d.txt", "created-in-head".into())],
+            &[
+                ("a.txt", "B".into()),
+                ("d.txt", "created-in-head".into()),
+                (
+                    "newfile.js",
+                    "// a new file commited from master\n// hello\n//\n".into(),
+                ),
+            ],
             "sha",
         );
         // fs.set_index_for_repo(dot_git, index_state);
@@ -2699,6 +2793,7 @@ mod tests {
             &[
                 ("a.txt", "A".into()),
                 ("c.txt", "in-merge-base-and-work-tree".into()),
+                ("newfile.js", "// a new file commited from master\n".into()),
             ],
         );
         cx.run_until_parked();
@@ -2712,8 +2807,12 @@ mod tests {
                 - A
                 + ˇC
                 + new
-                + created-in-head"
-                .unindent(),
+                + created-in-head
+                  // a new file commited from master
+                - // hello
+                - //
+                "
+            .unindent(),
         );
 
         let statuses: HashMap<Arc<RelPath>, Option<FileStatus>> =
@@ -2748,6 +2847,13 @@ mod tests {
                     Some(FileStatus::Tracked(TrackedStatus {
                         index_status: git::status::StatusCode::Added,
                         worktree_status: git::status::StatusCode::Added
+                    }))
+                ),
+                (
+                    rel_path("newfile.js").into_arc(),
+                    Some(FileStatus::Tracked(TrackedStatus {
+                        index_status: git::status::StatusCode::Modified,
+                        worktree_status: git::status::StatusCode::Modified
                     }))
                 )
             ])

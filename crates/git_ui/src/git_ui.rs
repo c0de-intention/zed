@@ -40,9 +40,11 @@ pub mod git_panel;
 mod git_panel_settings;
 pub mod git_picker;
 mod git_runtime_diagnostics;
+mod github_pull_request;
 pub mod multi_diff_view;
 pub mod picker_prompt;
 pub mod project_diff;
+pub mod pull_request_panel;
 pub(crate) mod remote_output;
 pub mod repository_selector;
 pub mod stash_picker;
@@ -78,6 +80,7 @@ pub fn init(cx: &mut App) {
         ProjectDiff::register(workspace, cx);
         CommitModal::register(workspace);
         git_panel::register(workspace);
+        pull_request_panel::register(workspace);
         repository_selector::register(workspace);
         git_picker::register(workspace);
 
