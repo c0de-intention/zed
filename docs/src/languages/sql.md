@@ -9,6 +9,33 @@ SQL files are handled by the [SQL Extension](https://github.com/zed-extensions/s
 
 - Tree-sitter: [nervenes/tree-sitter-sql](https://github.com/nervenes/tree-sitter-sql)
 
+### Postgres Language Server
+
+Zed can run [`postgres-language-server`](https://github.com/supabase-community/postgres-language-server) for `.sql` files to provide Postgres-compatible syntax diagnostics, completions, hover information, type checking, and formatting.
+
+Install the SQL extension, then open a `.sql` file. Zed will use a `postgres-language-server` binary from your `PATH` if one is available, or download the matching binary from the official GitHub releases.
+
+For schema-aware completions and type checking, provide a database connection using one of the environment variables supported by the language server, such as `DATABASE_URL`:
+
+```sh
+export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/postgres"
+```
+
+You can also create a `postgres-language-server.jsonc` file at your project root:
+
+```json
+{
+  "$schema": "https://pg-language-server.com/latest/schema.json",
+  "db": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "username": "postgres",
+    "password": "postgres",
+    "database": "postgres"
+  }
+}
+```
+
 ### Formatting
 
 Zed supports auto-formatting SQL using external tools like [`sql-formatter`](https://github.com/sql-formatter-org/sql-formatter).

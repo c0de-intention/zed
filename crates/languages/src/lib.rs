@@ -23,6 +23,7 @@ mod eslint;
 mod go;
 mod json;
 mod package_json;
+mod postgres;
 mod python;
 mod rust;
 mod tailwind;
@@ -66,6 +67,7 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
     let json_context_provider = Arc::new(JsonTaskProvider);
     let json_lsp_adapter = Arc::new(json::JsonLspAdapter::new(languages.clone(), node.clone()));
     let node_version_lsp_adapter = Arc::new(json::NodeVersionAdapter);
+    let postgres_lsp_adapter = Arc::new(postgres::PostgresLspAdapter);
     let py_lsp_adapter = Arc::new(python::PyLspAdapter::new());
     let ty_lsp_adapter = Arc::new(python::TyLspAdapter::new(fs.clone()));
     let python_context_provider = Arc::new(python::PythonContextProvider);
@@ -263,6 +265,11 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
         LanguageServerName("typescript-language-server".into()),
         typescript_lsp_adapter,
     );
+    languages.register_available_lsp_adapter(
+        LanguageServerName("postgres-language-server".into()),
+        postgres_lsp_adapter.clone(),
+    );
+    languages.register_lsp_adapter("SQL".into(), postgres_lsp_adapter);
 
     // Register Tailwind for the existing languages that should have it by default.
     //
