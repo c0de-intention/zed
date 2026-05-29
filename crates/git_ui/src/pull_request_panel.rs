@@ -26,6 +26,8 @@ actions!(
         Refresh,
         /// Toggles the selected pull request file's viewed state on GitHub.
         ToggleViewed,
+        /// Opens the selected pull request comment or file on GitHub.
+        ViewInGithub,
     ]
 );
 
@@ -84,6 +86,22 @@ impl PullRequestPanel {
         self.panel.update(cx, |panel, cx| {
             panel.toggle_viewed_for_project_path(project_path, window, cx)
         })
+    }
+
+    pub(crate) fn view_selected_in_github(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.panel.update(cx, |panel, cx| {
+            panel.view_selected_in_github(window, cx);
+        });
+    }
+
+    pub(crate) fn pull_request_context(
+        &self,
+        cx: &App,
+    ) -> (
+        Vec<editor::PullRequestFileLink>,
+        Vec<editor::PullRequestCommentThread>,
+    ) {
+        self.panel.read(cx).pull_request_context(cx)
     }
 }
 

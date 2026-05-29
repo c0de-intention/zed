@@ -4,7 +4,8 @@ use crate::commit_tooltip::{CommitAvatar, CommitTooltip};
 use crate::commit_view::CommitView;
 use crate::git_panel_settings::GitPanelScrollbarAccessor;
 use crate::github_pull_request::{
-    fetch_pull_request_files, is_pull_request_not_found_error, set_pull_request_file_viewed,
+    PullRequestComment, fetch_pull_request_files, is_pull_request_not_found_error,
+    set_pull_request_file_viewed,
 };
 use crate::project_diff::{self, BranchDiff, Diff, ProjectDiff};
 use crate::pull_request_panel::{Refresh as RefreshPullRequest, ToggleViewed};
@@ -20,6 +21,10 @@ use askpass::AskPassDelegate;
 use collections::{BTreeMap, HashMap, HashSet};
 use db::kvp::KeyValueStore;
 use editor::{Editor, EditorElement, EditorMode, MultiBuffer, MultiBufferOffset, SizingBehavior};
+use editor::{
+    Editor, EditorElement, EditorMode, MultiBuffer, MultiBufferOffset, PullRequestCommentThread,
+    PullRequestFileLink, SizingBehavior,
+};
 use editor::{EditorStyle, RewrapOptions};
 use file_icons::FileIcons;
 use futures::StreamExt as _;
@@ -69,6 +74,7 @@ use prompt_store::RULES_FILE_NAMES;
 use proto::RpcError;
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore, StatusStyle, update_settings_file};
+use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use std::future::Future;
 use std::ops::Range;
@@ -795,6 +801,8 @@ pub struct GitPanel {
     pull_request_branch_diff: Option<Entity<branch_diff::BranchDiff>>,
     pull_request_branch_diff_subscription: Option<Subscription>,
     pull_request_files: HashMap<RepoPath, PullRequestFileState>,
+    pull_request_comments: HashMap<RepoPath, Vec<PullRequestCommentState>>,
+    pull_request_url: Option<SharedString>,
     pull_request_id: Option<String>,
     pull_request_title: Option<SharedString>,
     pull_request_status: Option<SharedString>,
@@ -809,6 +817,15 @@ pub struct GitPanel {
 #[derive(Clone, Debug)]
 struct PullRequestFileState {
     viewed: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PullRequestCommentState {
+    start_line: Option<u32>,
+    line: Option<u32>,
+    original_start_line: Option<u32>,
+    original_line: Option<u32>,
+    url: SharedString,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1008,6 +1025,8 @@ impl GitPanel {
                 pull_request_branch_diff: None,
                 pull_request_branch_diff_subscription: None,
                 pull_request_files: HashMap::default(),
+                pull_request_comments: HashMap::default(),
+                pull_request_url: None,
                 pull_request_id: None,
                 pull_request_title: None,
                 pull_request_status: None,
@@ -1116,6 +1135,8 @@ impl GitPanel {
         self.pull_request_not_found = false;
         self.active_repository = Some(active_repository.clone());
         self.pull_request_files.clear();
+        self.pull_request_comments.clear();
+        self.pull_request_url.take();
         self.pull_request_id.take();
         self.pull_request_title.take();
         cx.notify();
@@ -1204,6 +1225,7 @@ impl GitPanel {
                     this.pull_request_not_found = false;
                     this.pull_request_id = Some(pull_request.id);
                     this.pull_request_title = Some(pull_request.title.into());
+                    this.pull_request_url = Some(pull_request.url.into());
                     this.pull_request_files = pull_request
                         .files
                         .into_iter()
@@ -1217,6 +1239,9 @@ impl GitPanel {
                             ))
                         })
                         .collect();
+                    this.pull_request_comments =
+                        Self::pull_request_comments_by_path(pull_request.comments);
+                    this.update_pull_request_comment_threads(cx);
                     this.pull_request_status = None;
                     cx.notify();
                 }
@@ -1226,7 +1251,10 @@ impl GitPanel {
                         this.pull_request_not_found = true;
                         this.pull_request_id.take();
                         this.pull_request_title.take();
+                        this.pull_request_url.take();
                         this.pull_request_files.clear();
+                        this.pull_request_comments.clear();
+                        this.update_pull_request_comment_threads(cx);
                         this.pull_request_status = None;
                     } else {
                         this.pull_request_status =
@@ -1264,6 +1292,28 @@ impl GitPanel {
                 }
             }
             None => {}
+        }
+    }
+
+    pub(crate) fn view_selected_in_github(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self
+            .get_selected_entry()
+            .and_then(|entry| entry.status_entry())
+        else {
+            return;
+        };
+
+        if let Some(comment) = self
+            .pull_request_comments
+            .get(&entry.repo_path)
+            .and_then(|comments| comments.first())
+        {
+            cx.open_url(comment.url.as_ref());
+            return;
+        }
+
+        if let Some(url) = self.pull_request_url.as_ref() {
+            cx.open_url(url.as_ref());
         }
     }
 
@@ -1331,6 +1381,109 @@ impl GitPanel {
             .as_ref()?
             .tracking_status()?;
         (status.ahead > 0 || status.behind > 0).then_some((status.ahead, status.behind))
+    }
+
+    fn pull_request_comments_by_path(
+        comments: Vec<PullRequestComment>,
+    ) -> HashMap<RepoPath, Vec<PullRequestCommentState>> {
+        let mut comments_by_path = HashMap::<RepoPath, Vec<PullRequestCommentState>>::default();
+        for comment in comments {
+            let Some(repo_path) = RepoPath::new(&comment.path).log_err() else {
+                continue;
+            };
+            comments_by_path
+                .entry(repo_path)
+                .or_default()
+                .push(PullRequestCommentState {
+                    start_line: comment.start_line,
+                    line: comment.line,
+                    original_start_line: comment.original_start_line,
+                    original_line: comment.original_line,
+                    url: comment.url.into(),
+                });
+        }
+        comments_by_path
+    }
+
+    fn pull_request_file_url(path: &RepoPath, pull_request_url: &str) -> SharedString {
+        let mut hasher = Sha256::new();
+        hasher.update(path.display(PathStyle::Posix).to_string().as_bytes());
+        let digest = hasher.finalize();
+        let digest = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("{pull_request_url}/files#diff-{digest}").into()
+    }
+
+    pub(crate) fn pull_request_file_links(&self, cx: &App) -> Vec<PullRequestFileLink> {
+        let Some(active_repository) = self.active_repository.as_ref() else {
+            return Vec::new();
+        };
+        let Some(pull_request_url) = self.pull_request_url.as_ref() else {
+            return Vec::new();
+        };
+        let repository = active_repository.read(cx);
+        self.pull_request_files
+            .keys()
+            .filter_map(|repo_path| {
+                let project_path = repository.repo_path_to_project_path(repo_path, cx)?;
+                Some(PullRequestFileLink {
+                    path: project_path.path,
+                    url: Self::pull_request_file_url(repo_path, pull_request_url.as_ref()),
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn pull_request_comment_threads(&self, cx: &App) -> Vec<PullRequestCommentThread> {
+        let Some(active_repository) = self.active_repository.as_ref() else {
+            return Vec::new();
+        };
+        let repository = active_repository.read(cx);
+        self.pull_request_comments
+            .iter()
+            .flat_map(|(path, comments)| {
+                repository
+                    .repo_path_to_project_path(path, cx)
+                    .into_iter()
+                    .flat_map(move |project_path| {
+                        comments
+                            .iter()
+                            .map(move |comment| PullRequestCommentThread {
+                                path: project_path.path.clone(),
+                                start_line: comment.start_line,
+                                line: comment.line,
+                                original_start_line: comment.original_start_line,
+                                original_line: comment.original_line,
+                                url: comment.url.clone(),
+                            })
+                    })
+            })
+            .collect()
+    }
+
+    pub(crate) fn pull_request_context(
+        &self,
+        cx: &App,
+    ) -> (Vec<PullRequestFileLink>, Vec<PullRequestCommentThread>) {
+        (
+            self.pull_request_file_links(cx),
+            self.pull_request_comment_threads(cx),
+        )
+    }
+
+    fn update_pull_request_comment_threads(&self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(project_diff) = workspace.read(cx).active_item_as::<ProjectDiff>(cx) else {
+            return;
+        };
+        let (file_links, threads) = self.pull_request_context(cx);
+        project_diff.update(cx, |project_diff, cx| {
+            project_diff.set_pull_request_context(file_links, threads, cx);
+        });
     }
 
     pub(crate) fn pull_request_is_loading(&self) -> bool {
@@ -6944,6 +7097,16 @@ impl GitPanel {
                     ))
                 })
             })
+            .when(
+                self.pull_request_comments.contains_key(&entry.repo_path),
+                |this| {
+                    this.child(
+                        Icon::new(IconName::Chat)
+                            .size(IconSize::Small)
+                            .color(Color::Accent),
+                    )
+                },
+            )
             .child(
                 div()
                     .id(checkbox_wrapper_id)
@@ -7491,7 +7654,6 @@ impl Render for GitPanel {
             .on_action(cx.listener(Self::close_panel))
             .on_action(cx.listener(Self::open_diff))
             .on_action(cx.listener(Self::open_solo_diff))
-            .on_action(cx.listener(Self::open_file))
             .on_action(cx.listener(Self::toggle_viewed_for_selected))
             .on_action(cx.listener(Self::refresh_pull_request))
             .on_action(cx.listener(Self::focus_changes_list))

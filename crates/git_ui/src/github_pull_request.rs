@@ -4,12 +4,24 @@ use std::{path::Path, process::Stdio, sync::Arc};
 pub struct PullRequestFiles {
     pub id: String,
     pub title: String,
+    pub url: String,
     pub files: Vec<PullRequestFile>,
+    pub comments: Vec<PullRequestComment>,
 }
 
 pub struct PullRequestFile {
     pub path: String,
     pub viewed: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct PullRequestComment {
+    pub path: String,
+    pub start_line: Option<u32>,
+    pub line: Option<u32>,
+    pub original_start_line: Option<u32>,
+    pub original_line: Option<u32>,
+    pub url: String,
 }
 
 async fn gh_output(work_directory: Arc<Path>, args: Vec<String>) -> anyhow::Result<String> {
@@ -39,7 +51,7 @@ pub async fn fetch_pull_request_files(
             "pr".into(),
             "view".into(),
             "--json".into(),
-            "id,number,title".into(),
+            "id,number,title,url".into(),
         ],
     )
     .await
@@ -59,6 +71,11 @@ pub async fn fetch_pull_request_files(
         .get("title")
         .and_then(|title| title.as_str())
         .context("pull request title missing")?
+        .to_string();
+    let pull_request_url = pull_request
+        .get("url")
+        .and_then(|url| url.as_str())
+        .context("pull request url missing")?
         .to_string();
 
     let repository_json = gh_output(
@@ -162,10 +179,70 @@ pub async fn fetch_pull_request_files(
         }
     }
 
+    let mut comments = Vec::new();
+    let mut page = 1;
+    loop {
+        let response_json = gh_output(
+            work_directory.clone(),
+            vec![
+                "api".into(),
+                "-X".into(),
+                "GET".into(),
+                format!("repos/{owner}/{name}/pulls/{pull_request_number}/comments"),
+                "-f".into(),
+                "per_page=100".into(),
+                "-f".into(),
+                format!("page={page}"),
+            ],
+        )
+        .await
+        .context("loading pull request comments")?;
+        let response: serde_json::Value =
+            serde_json::from_str(&response_json).context("parsing pull request comments JSON")?;
+        let Some(nodes) = response.as_array() else {
+            break;
+        };
+        if nodes.is_empty() {
+            break;
+        }
+
+        comments.extend(nodes.iter().filter_map(|node| {
+            let path = node.get("path")?.as_str()?.to_string();
+            let url = node.get("html_url")?.as_str()?.to_string();
+            let line = node
+                .get("line")
+                .and_then(|line| line.as_u64())
+                .and_then(|line| u32::try_from(line).ok());
+            let start_line = node
+                .get("start_line")
+                .and_then(|line| line.as_u64())
+                .and_then(|line| u32::try_from(line).ok());
+            let original_line = node
+                .get("original_line")
+                .and_then(|line| line.as_u64())
+                .and_then(|line| u32::try_from(line).ok());
+            let original_start_line = node
+                .get("original_start_line")
+                .and_then(|line| line.as_u64())
+                .and_then(|line| u32::try_from(line).ok());
+            Some(PullRequestComment {
+                path,
+                start_line,
+                line,
+                original_start_line,
+                original_line,
+                url,
+            })
+        }));
+        page += 1;
+    }
+
     Ok(PullRequestFiles {
         id: pull_request_id,
         title: pull_request_title,
+        url: pull_request_url,
         files,
+        comments,
     })
 }
 

@@ -112,6 +112,7 @@ use git::{
     update_uncommitted_diff_for_buffer,
 };
 pub(crate) use git::{DisplayDiffHunk, PhantomDiffReviewIndicator};
+pub use git::{PullRequestCommentThread, PullRequestFileLink};
 pub use git::{RenderDiffHunkControlsFn, set_blame_renderer};
 pub use hover_popover::hover_markdown_style;
 pub use inlays::Inlay;
@@ -1110,6 +1111,8 @@ pub struct Editor {
     stored_review_comments: Vec<(DiffHunkKey, Vec<StoredReviewComment>)>,
     /// Counter for generating unique comment IDs.
     next_review_comment_id: usize,
+    pull_request_file_links: Vec<PullRequestFileLink>,
+    pull_request_comment_threads: Vec<PullRequestCommentThread>,
     hovered_diff_hunk_row: Option<DisplayRow>,
     pull_diagnostics_task: Task<()>,
     in_project_search: bool,
@@ -2297,6 +2300,8 @@ impl Editor {
             diff_review_overlays: Vec::new(),
             stored_review_comments: Vec::new(),
             next_review_comment_id: 0,
+            pull_request_file_links: Vec::new(),
+            pull_request_comment_threads: Vec::new(),
             hovered_diff_hunk_row: None,
             _subscriptions: (!is_minimap)
                 .then(|| {

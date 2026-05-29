@@ -2,14 +2,15 @@ use crate::{
     branch_picker, conflict_view,
     git_panel::{GitPanel, GitPanelAddon, GitStatusEntry},
     git_panel_settings::GitPanelSettings,
-    pull_request_panel::{PullRequestPanel, ToggleViewed},
+    pull_request_panel::{PullRequestPanel, ToggleViewed, ViewInGithub},
 };
 use agent_settings::AgentSettings;
 use anyhow::{Context as _, Result, anyhow};
 use buffer_diff::{BufferDiff, DiffHunkSecondaryStatus};
 use collections::HashMap;
 use editor::{
-    Addon, Editor, EditorEvent, EditorSettings, SelectionEffects, SplittableEditor,
+    Addon, Editor, EditorEvent, EditorSettings, PullRequestCommentThread, PullRequestFileLink,
+    SelectionEffects, SplittableEditor,
     actions::{GoToHunk, GoToPreviousHunk, SendReviewToAgent},
     multibuffer_context_lines,
     scroll::Autoscroll,
@@ -102,6 +103,23 @@ impl ProjectDiff {
         workspace.register_action(Self::deploy);
         workspace.register_action(Self::deploy_branch_diff);
         workspace.register_action(Self::compare_with_branch);
+        workspace.register_action(|workspace, _: &ViewInGithub, window, cx| {
+            if let Some(project_diff) = workspace.active_item_as::<ProjectDiff>(cx) {
+                let opened = project_diff.update(cx, |project_diff, cx| {
+                    project_diff.view_in_github(window, cx)
+                });
+                if !opened {
+                    workspace.show_error(
+                        &anyhow!("Could not determine a GitHub pull request file URL"),
+                        cx,
+                    );
+                }
+            } else if let Some(pull_request_panel) = workspace.panel::<PullRequestPanel>(cx) {
+                pull_request_panel.update(cx, |panel, cx| {
+                    panel.view_selected_in_github(window, cx);
+                });
+            }
+        });
         workspace.register_action(|workspace, _: &Add, window, cx| {
             Self::deploy(workspace, &Diff, window, cx);
         });
@@ -548,6 +566,21 @@ impl ProjectDiff {
         let editor_subscription = cx.subscribe_in(&editor, window, Self::handle_editor_event);
 
         let primary_editor = editor.read(cx).rhs_editor().clone();
+        let workspace_for_pull_request_context = workspace.clone();
+        let editor_for_pull_request_context = editor.clone();
+        cx.defer(move |cx| {
+            if let Some(pull_request_panel) = workspace_for_pull_request_context
+                .read(cx)
+                .panel::<PullRequestPanel>(cx)
+            {
+                let (file_links, threads) = pull_request_panel.read(cx).pull_request_context(cx);
+                editor_for_pull_request_context.update(cx, |editor, cx| {
+                    editor.update_editors(cx, |editor, cx| {
+                        editor.set_pull_request_context(file_links.clone(), threads.clone(), cx);
+                    });
+                });
+            }
+        });
         let review_comment_subscription =
             cx.subscribe(&primary_editor, |this, _editor, event: &EditorEvent, cx| {
                 if let EditorEvent::ReviewCommentsChanged { total_count } = event {
@@ -769,6 +802,34 @@ impl ProjectDiff {
     /// Returns the total count of review comments across all hunks/files.
     pub fn total_review_comment_count(&self) -> usize {
         self.review_comment_count
+    }
+
+    pub fn set_pull_request_context(
+        &mut self,
+        file_links: Vec<PullRequestFileLink>,
+        threads: Vec<PullRequestCommentThread>,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.update(cx, |editor, cx| {
+            editor.update_editors(cx, |editor, cx| {
+                editor.set_pull_request_context(file_links.clone(), threads.clone(), cx);
+            });
+        });
+    }
+
+    fn view_in_github(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let url = self
+            .editor
+            .read(cx)
+            .focused_editor()
+            .read(cx)
+            .pull_request_url_for_selection(cx);
+        if let Some(url) = url {
+            cx.open_url(url.as_ref());
+            return true;
+        }
+
+        false
     }
 
     /// Returns a reference to the splittable editor.
