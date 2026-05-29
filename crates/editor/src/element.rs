@@ -6503,6 +6503,10 @@ impl EditorElement {
                 breakpoint.paint(window, cx);
             }
 
+            for marker in layout.pull_request_comment_markers.iter_mut() {
+                marker.paint(window, cx);
+            }
+
             for test_indicator in layout.test_indicators.iter_mut() {
                 test_indicator.paint(window, cx);
             }
@@ -11068,6 +11072,31 @@ impl Element for EditorElement {
                             gutter.prepaint_button(button, display_row, window, cx)
                         });
 
+                    let pull_request_comment_markers = row_infos
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(row_index, row_info)| {
+                            let display_row = DisplayRow(start_row.0 + row_index as u32);
+                            let url = self.editor.read(cx).pull_request_comment_url_for_row(
+                                row_info,
+                                snapshot.buffer_snapshot(),
+                                cx,
+                            )?;
+                            let button_width = available_width - px(6.);
+                            let marker = self.editor.update(cx, |editor, cx| {
+                                editor
+                                    .render_pull_request_comment_marker(
+                                        display_row,
+                                        url,
+                                        button_width,
+                                        cx,
+                                    )
+                                    .into_any_element()
+                            });
+                            Some(gutter.prepaint_button(marker, display_row, window, cx))
+                        })
+                        .collect::<Vec<_>>();
+
                     self.layout_signature_help(
                         &hitbox,
                         content_origin,
@@ -11304,6 +11333,7 @@ impl Element for EditorElement {
                         test_indicators,
                         bookmarks,
                         breakpoints,
+                        pull_request_comment_markers,
                         diff_review_button,
                         crease_toggles,
                         crease_trailers,
@@ -11519,6 +11549,7 @@ pub struct EditorLayout {
     test_indicators: Vec<AnyElement>,
     bookmarks: Vec<AnyElement>,
     breakpoints: Vec<AnyElement>,
+    pull_request_comment_markers: Vec<AnyElement>,
     diff_review_button: Option<AnyElement>,
     crease_toggles: Vec<Option<AnyElement>>,
     expand_toggles: Vec<Option<(AnyElement, gpui::Point<Pixels>)>>,

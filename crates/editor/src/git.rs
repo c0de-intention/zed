@@ -112,6 +112,22 @@ pub(super) struct DiffReviewOverlay {
     _subscription: Subscription,
 }
 
+#[derive(Clone, Debug)]
+pub struct PullRequestCommentThread {
+    pub path: Arc<util::rel_path::RelPath>,
+    pub start_line: Option<u32>,
+    pub line: Option<u32>,
+    pub original_start_line: Option<u32>,
+    pub original_line: Option<u32>,
+    pub url: SharedString,
+}
+
+#[derive(Clone, Debug)]
+pub struct PullRequestFileLink {
+    pub path: Arc<util::rel_path::RelPath>,
+    pub url: SharedString,
+}
+
 impl DiffReviewDragState {
     pub(super) fn row_range(
         &self,
@@ -135,7 +151,85 @@ impl StoredReviewComment {
     }
 }
 
+impl PullRequestCommentThread {
+    fn contains_line(&self, line: u32) -> bool {
+        Self::contains_line_range(self.start_line, self.line, line)
+            || Self::contains_line_range(self.original_start_line, self.original_line, line)
+    }
+
+    fn contains_line_range(start: Option<u32>, end: Option<u32>, line: u32) -> bool {
+        match (start, end) {
+            (Some(start), Some(end)) => (start.min(end)..=start.max(end)).contains(&line),
+            (None, Some(end)) => end == line,
+            (Some(start), None) => start == line,
+            (None, None) => false,
+        }
+    }
+}
+
 impl Editor {
+    fn pull_request_selection_location(
+        &self,
+        cx: &App,
+    ) -> Option<(Arc<util::rel_path::RelPath>, u32)> {
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let head = self.selections.newest_anchor().head();
+        let (buffer_anchor, buffer) = snapshot.anchor_to_buffer_anchor(head)?;
+        let file_path = buffer.file()?.path().clone();
+        let line = buffer_anchor.to_point(buffer).row.saturating_add(1);
+        Some((file_path, line))
+    }
+
+    pub fn set_pull_request_context(
+        &mut self,
+        file_links: Vec<PullRequestFileLink>,
+        threads: Vec<PullRequestCommentThread>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pull_request_file_links = file_links;
+        self.pull_request_comment_threads = threads;
+        cx.notify();
+    }
+
+    pub fn pull_request_comment_url_for_selection(&self, cx: &App) -> Option<SharedString> {
+        let (file_path, line) = self.pull_request_selection_location(cx)?;
+        self.pull_request_comment_threads
+            .iter()
+            .find(|thread| thread.path == file_path && thread.contains_line(line))
+            .map(|thread| thread.url.clone())
+    }
+
+    pub fn pull_request_url_for_selection(&self, cx: &App) -> Option<SharedString> {
+        let (file_path, line) = self.pull_request_selection_location(cx)?;
+        self.pull_request_comment_threads
+            .iter()
+            .find(|thread| thread.path == file_path && thread.contains_line(line))
+            .map(|thread| thread.url.clone())
+            .or_else(|| {
+                self.pull_request_file_links
+                    .iter()
+                    .find(|file_link| file_link.path == file_path)
+                    .map(|file_link| format!("{}R{line}", file_link.url).into())
+            })
+    }
+
+    pub(super) fn pull_request_comment_url_for_row(
+        &self,
+        row_info: &RowInfo,
+        snapshot: &MultiBufferSnapshot,
+        _cx: &App,
+    ) -> Option<SharedString> {
+        let buffer_id = row_info.buffer_id?;
+        let buffer_row = row_info.buffer_row?;
+        let buffer = snapshot.buffer_for_id(buffer_id)?;
+        let file_path = buffer.file()?.path().clone();
+        let line = buffer_row.saturating_add(1);
+        self.pull_request_comment_threads
+            .iter()
+            .find(|thread| thread.path == file_path && thread.contains_line(line))
+            .map(|thread| thread.url.clone())
+    }
+
     pub fn diff_hunks_in_ranges<'a>(
         &'a self,
         ranges: &'a [Range<Anchor>],
@@ -822,6 +916,31 @@ impl Editor {
                     editor.start_diff_review_drag(display_row, window, cx);
                 }),
             )
+    }
+
+    pub(super) fn render_pull_request_comment_marker(
+        &self,
+        display_row: DisplayRow,
+        url: SharedString,
+        width: Pixels,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .id(("pull_request_comment_marker", display_row.0))
+            .cursor_pointer()
+            .w(width - px(1.))
+            .h(relative(0.9))
+            .justify_center()
+            .rounded_sm()
+            .child(
+                Icon::new(IconName::Chat)
+                    .size(IconSize::Small)
+                    .color(Color::Accent),
+            )
+            .tooltip(Tooltip::text("View on GitHub"))
+            .on_click(move |_, _, cx| {
+                cx.open_url(url.as_ref());
+            })
     }
 
     pub(super) fn start_diff_review_drag(
