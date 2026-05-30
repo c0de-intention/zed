@@ -45,6 +45,7 @@ pub mod multi_diff_view;
 pub mod picker_prompt;
 pub mod project_diff;
 pub mod pull_request_panel;
+pub mod pull_request_picker;
 pub(crate) mod remote_output;
 pub mod repository_selector;
 pub mod stash_picker;
@@ -54,6 +55,13 @@ pub mod worktree_picker;
 pub mod worktree_service;
 
 pub use conflict_view::MergeConflictIndicator;
+pub use pull_request_picker::{
+    NextPullRequestFilter, OpenCurrentPullRequestInBrowser, OpenMyPullRequestsPicker,
+    OpenPullRequestPicker, OpenPullRequestsAssignedToMePicker,
+    OpenPullRequestsAwaitingReviewPicker, OpenPullRequestsInvolvingMePicker,
+    PreviousPullRequestFilter, ShowAllPullRequests, ShowMyPullRequests,
+    ShowPullRequestsAssignedToMe, ShowPullRequestsAwaitingReview, ShowPullRequestsInvolvingMe,
+};
 
 pub fn get_provider_icon(name: &str) -> IconName {
     match name {
@@ -81,6 +89,7 @@ pub fn init(cx: &mut App) {
         CommitModal::register(workspace);
         git_panel::register(workspace);
         pull_request_panel::register(workspace);
+        pull_request_picker::register(workspace);
         repository_selector::register(workspace);
         git_picker::register(workspace);
 

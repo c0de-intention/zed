@@ -1104,6 +1104,13 @@
     },
   },
   {
+    "context": "PullRequestPicker > Picker > Editor",
+    "bindings": {
+      "tab": "pull_request_picker::NextPullRequestFilter",
+      "shift-tab": "pull_request_picker::PreviousPullRequestFilter",
+    },
+  },
+  {
     "context": "GitCommit > Editor && VimControl && vim_mode == normal",
     "bindings": {
       "ctrl-c": "menu::Cancel",

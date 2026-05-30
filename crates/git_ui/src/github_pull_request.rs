@@ -15,6 +15,15 @@ pub struct PullRequestFile {
 }
 
 #[derive(Clone, Debug)]
+pub struct OpenPullRequest {
+    pub number: u32,
+    pub title: String,
+    pub branch: String,
+    pub author: Option<String>,
+    pub is_draft: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct PullRequestComment {
     pub path: String,
     pub start_line: Option<u32>,
@@ -42,6 +51,94 @@ async fn gh_output(work_directory: Arc<Path>, args: Vec<String>) -> anyhow::Resu
     }
 
     String::from_utf8(output.stdout).context("decoding gh output")
+}
+
+pub async fn fetch_open_pull_requests(
+    work_directory: Arc<Path>,
+    search_query: Option<String>,
+) -> anyhow::Result<Vec<OpenPullRequest>> {
+    let mut args = vec![
+        "pr".into(),
+        "list".into(),
+        "--state".into(),
+        "open".into(),
+        "--limit".into(),
+        "100".into(),
+        "--json".into(),
+        "number,title,headRefName,author,isDraft".into(),
+    ];
+    if let Some(search_query) = search_query {
+        args.extend(["--search".into(), search_query]);
+    }
+
+    let pull_requests_json = gh_output(work_directory, args)
+        .await
+        .context("loading open pull requests")?;
+    let pull_requests: serde_json::Value =
+        serde_json::from_str(&pull_requests_json).context("parsing open pull requests JSON")?;
+    let pull_requests = pull_requests
+        .as_array()
+        .context("open pull requests response was not an array")?;
+
+    Ok(pull_requests
+        .iter()
+        .filter_map(|node| {
+            let number = node
+                .get("number")?
+                .as_u64()
+                .and_then(|number| u32::try_from(number).ok())?;
+            let title = node.get("title")?.as_str()?.to_string();
+            let branch = node.get("headRefName")?.as_str()?.to_string();
+            let author = node
+                .get("author")
+                .and_then(|author| author.get("login"))
+                .and_then(|login| login.as_str())
+                .map(ToOwned::to_owned);
+            let is_draft = node
+                .get("isDraft")
+                .and_then(|is_draft| is_draft.as_bool())
+                .unwrap_or(false);
+            Some(OpenPullRequest {
+                number,
+                title,
+                branch,
+                author,
+                is_draft,
+            })
+        })
+        .collect())
+}
+
+pub async fn fetch_current_pull_request_number(
+    work_directory: Arc<Path>,
+) -> anyhow::Result<Option<u32>> {
+    let pull_request_json = match gh_output(
+        work_directory,
+        vec!["pr".into(), "view".into(), "--json".into(), "number".into()],
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(error) if is_pull_request_not_found_error(&error) => return Ok(None),
+        Err(error) => return Err(error).context("loading current pull request"),
+    };
+    let pull_request: serde_json::Value =
+        serde_json::from_str(&pull_request_json).context("parsing current pull request JSON")?;
+    let number = pull_request
+        .get("number")
+        .and_then(|number| number.as_u64())
+        .and_then(|number| u32::try_from(number).ok());
+    Ok(number)
+}
+
+pub async fn open_current_pull_request_in_browser(work_directory: Arc<Path>) -> anyhow::Result<()> {
+    gh_output(
+        work_directory,
+        vec!["pr".into(), "view".into(), "--web".into()],
+    )
+    .await
+    .context("opening current pull request in browser")?;
+    Ok(())
 }
 
 pub async fn fetch_pull_request_files(
