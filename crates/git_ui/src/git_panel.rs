@@ -837,6 +837,8 @@ struct PullRequestCommentState {
     original_start_line: Option<u32>,
     original_line: Option<u32>,
     url: SharedString,
+    body: SharedString,
+    author: Option<SharedString>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1410,6 +1412,8 @@ impl GitPanel {
                     original_start_line: comment.original_start_line,
                     original_line: comment.original_line,
                     url: comment.url.into(),
+                    body: comment.body.into(),
+                    author: comment.author.map(Into::into),
                 });
         }
         comments_by_path
@@ -1467,6 +1471,8 @@ impl GitPanel {
                                 original_start_line: comment.original_start_line,
                                 original_line: comment.original_line,
                                 url: comment.url.clone(),
+                                body: comment.body.clone(),
+                                author: comment.author.clone(),
                             })
                     })
             })

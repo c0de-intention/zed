@@ -120,12 +120,25 @@ pub struct PullRequestCommentThread {
     pub original_start_line: Option<u32>,
     pub original_line: Option<u32>,
     pub url: SharedString,
+    pub body: SharedString,
+    pub author: Option<SharedString>,
 }
 
 #[derive(Clone, Debug)]
 pub struct PullRequestFileLink {
     pub path: Arc<util::rel_path::RelPath>,
     pub url: SharedString,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PullRequestThreadKey {
+    path: Arc<util::rel_path::RelPath>,
+    line: u32,
+}
+
+pub(crate) struct PullRequestThreadBlock {
+    key: PullRequestThreadKey,
+    block_id: CustomBlockId,
 }
 
 impl DiffReviewDragState {
@@ -152,6 +165,13 @@ impl StoredReviewComment {
 }
 
 impl PullRequestCommentThread {
+    fn display_line(&self) -> Option<u32> {
+        self.line
+            .or(self.original_line)
+            .or(self.start_line)
+            .or(self.original_start_line)
+    }
+
     fn contains_line(&self, line: u32) -> bool {
         Self::contains_line_range(self.start_line, self.line, line)
             || Self::contains_line_range(self.original_start_line, self.original_line, line)
@@ -186,6 +206,7 @@ impl Editor {
         threads: Vec<PullRequestCommentThread>,
         cx: &mut Context<Self>,
     ) {
+        self.dismiss_all_pull_request_threads(cx);
         self.pull_request_file_links = file_links;
         self.pull_request_comment_threads = threads;
         cx.notify();
@@ -211,6 +232,192 @@ impl Editor {
                     .find(|file_link| file_link.path == file_path)
                     .map(|file_link| format!("{}R{line}", file_link.url).into())
             })
+    }
+
+    fn pull_request_comments_for_line(
+        &self,
+        path: &Arc<util::rel_path::RelPath>,
+        line: u32,
+    ) -> Vec<PullRequestCommentThread> {
+        self.pull_request_comment_threads
+            .iter()
+            .filter(|thread| thread.path.as_ref() == path.as_ref() && thread.contains_line(line))
+            .cloned()
+            .collect()
+    }
+
+    fn pull_request_thread_groups(
+        &self,
+    ) -> Vec<(PullRequestThreadKey, Vec<PullRequestCommentThread>)> {
+        let mut groups = Vec::<(PullRequestThreadKey, Vec<PullRequestCommentThread>)>::new();
+        for thread in &self.pull_request_comment_threads {
+            let Some(line) = thread.display_line() else {
+                continue;
+            };
+            let key = PullRequestThreadKey {
+                path: thread.path.clone(),
+                line,
+            };
+            if let Some((_, comments)) = groups
+                .iter_mut()
+                .find(|(existing_key, _)| *existing_key == key)
+            {
+                comments.push(thread.clone());
+            } else {
+                groups.push((key, vec![thread.clone()]));
+            }
+        }
+        groups
+    }
+
+    fn pull_request_thread_anchor(&self, key: &PullRequestThreadKey, cx: &App) -> Option<Anchor> {
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let row = key.line.checked_sub(1)?;
+        for buffer in self.buffer.read(cx).all_buffers() {
+            let buffer = buffer.read(cx);
+            if buffer.file()?.path() != &key.path {
+                continue;
+            }
+            let buffer_snapshot = buffer.snapshot();
+            if row > buffer_snapshot.max_point().row {
+                return None;
+            }
+            let column = buffer_snapshot.line_len(row);
+            let buffer_anchor = buffer_snapshot.anchor_after(Point::new(row, column));
+            return snapshot.anchor_in_buffer(buffer_anchor);
+        }
+        None
+    }
+
+    fn pull_request_selection_thread_anchor(&self, cx: &App) -> Option<Anchor> {
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let head = self.selections.newest_anchor().head();
+        let point = head.to_point(&snapshot);
+        let column = snapshot.line_len(MultiBufferRow(point.row));
+        Some(snapshot.anchor_after(Point::new(point.row, column)))
+    }
+
+    fn open_pull_request_thread(
+        &mut self,
+        key: PullRequestThreadKey,
+        comments: Vec<PullRequestCommentThread>,
+        anchor: Anchor,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .open_pull_request_threads
+            .iter()
+            .any(|thread| thread.key == key)
+        {
+            return;
+        }
+
+        let height = Self::pull_request_thread_block_height(&comments);
+        let block = BlockProperties {
+            style: BlockStyle::Sticky,
+            placement: BlockPlacement::Below(anchor),
+            height: Some(height),
+            render: Arc::new(move |cx| Self::render_pull_request_thread(comments.clone(), cx)),
+            priority: 0,
+        };
+        let block_ids = self.insert_blocks([block], None, cx);
+        let Some(block_id) = block_ids.into_iter().next() else {
+            log::error!("Failed to insert pull request thread block");
+            return;
+        };
+        self.open_pull_request_threads
+            .push(PullRequestThreadBlock { key, block_id });
+    }
+
+    fn close_pull_request_thread(
+        &mut self,
+        key: &PullRequestThreadKey,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self
+            .open_pull_request_threads
+            .iter()
+            .position(|thread| thread.key == *key)
+        else {
+            return false;
+        };
+        let thread = self.open_pull_request_threads.remove(index);
+        self.remove_blocks(HashSet::from_iter([thread.block_id]), None, cx);
+        true
+    }
+
+    pub fn toggle_pull_request_thread(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((path, line)) = self.pull_request_selection_location(cx) else {
+            return false;
+        };
+        let comments = self.pull_request_comments_for_line(&path, line);
+        if comments.is_empty() {
+            return false;
+        }
+        let key = PullRequestThreadKey { path, line };
+        if self.close_pull_request_thread(&key, cx) {
+            cx.notify();
+            return true;
+        }
+        let Some(anchor) = self.pull_request_selection_thread_anchor(cx) else {
+            return false;
+        };
+        self.open_pull_request_thread(key, comments, anchor, cx);
+        cx.notify();
+        true
+    }
+
+    pub fn toggle_all_pull_request_threads(&mut self, cx: &mut Context<Self>) {
+        let groups = self.pull_request_thread_groups();
+        if groups.is_empty() {
+            return;
+        }
+
+        let all_open = groups.iter().all(|(key, _)| {
+            self.open_pull_request_threads
+                .iter()
+                .any(|thread| thread.key == *key)
+        });
+
+        if all_open {
+            self.dismiss_all_pull_request_threads(cx);
+            return;
+        }
+
+        for (key, comments) in groups {
+            if self
+                .open_pull_request_threads
+                .iter()
+                .any(|thread| thread.key == key)
+            {
+                continue;
+            }
+            let Some(anchor) = self.pull_request_thread_anchor(&key, cx) else {
+                continue;
+            };
+            self.open_pull_request_thread(key, comments, anchor, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn dismiss_all_pull_request_threads(&mut self, cx: &mut Context<Self>) {
+        if self.open_pull_request_threads.is_empty() {
+            return;
+        }
+        let block_ids = self
+            .open_pull_request_threads
+            .drain(..)
+            .map(|thread| thread.block_id)
+            .collect();
+        self.remove_blocks(block_ids, None, cx);
+        cx.notify();
+    }
+
+    fn pull_request_thread_block_height(comments: &[PullRequestCommentThread]) -> u32 {
+        comments.iter().fold(1, |height, comment| {
+            let line_count = comment.body.as_ref().lines().count().max(1);
+            height + line_count.min(6) as u32 + 2
+        })
     }
 
     pub(super) fn pull_request_comment_url_for_row(
@@ -941,6 +1148,85 @@ impl Editor {
             .on_click(move |_, _, cx| {
                 cx.open_url(url.as_ref());
             })
+    }
+
+    fn render_pull_request_thread(
+        comments: Vec<PullRequestCommentThread>,
+        cx: &mut BlockContext,
+    ) -> AnyElement {
+        let colors = cx.theme().colors();
+        let comment_count = comments.len();
+
+        v_flex()
+            .w_full()
+            .bg(colors.editor_background)
+            .border_b_1()
+            .border_color(colors.border)
+            .px_3()
+            .py_2()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        Icon::new(IconName::Chat)
+                            .size(IconSize::Small)
+                            .color(Color::Accent),
+                    )
+                    .child(
+                        Label::new(format!(
+                            "{} GitHub Comment{}",
+                            comment_count,
+                            if comment_count == 1 { "" } else { "s" }
+                        ))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    ),
+            )
+            .children(comments.into_iter().map(|comment| {
+                let author = comment.author.clone().unwrap_or_else(|| "GitHub".into());
+                h_flex()
+                    .w_full()
+                    .items_start()
+                    .gap_2()
+                    .px_2()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(colors.surface_background)
+                    .child(
+                        div()
+                            .size(px(20.))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(colors.ghost_element_background)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Icon::new(IconName::Person)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .gap_1()
+                            .child(
+                                Label::new(author)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(colors.text)
+                                    .child(comment.body.clone()),
+                            ),
+                    )
+            }))
+            .into_any_element()
     }
 
     pub(super) fn start_diff_review_drag(

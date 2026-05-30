@@ -3,7 +3,7 @@ use crate::{
     conflict_view::ConflictAddon,
     git_panel::{GitPanel, GitPanelAddon, GitStatusEntry},
     git_panel_settings::GitPanelSettings,
-    pull_request_panel::{PullRequestPanel, ToggleViewed, ViewInGithub},
+    pull_request_panel::{PullRequestPanel, ToggleViewed},
 };
 use agent_settings::AgentSettings;
 use anyhow::{Context as _, Result, anyhow};
@@ -68,6 +68,18 @@ actions!(
         /// Opens a new agent thread with the branch diff for review.
         ReviewDiff,
         LeaderAndFollower,
+    ]
+);
+
+actions!(
+    pr_diff,
+    [
+        /// Toggles the pull request thread at the selected diff line.
+        ToggleThread,
+        /// Toggles all pull request threads in the diff.
+        ToggleAllThreads,
+        /// Opens the selected pull request comment or file on GitHub.
+        ViewInGithub,
     ]
 );
 
@@ -629,6 +641,32 @@ impl ProjectDiff {
                 );
             });
         }
+    }
+
+    fn toggle_pull_request_thread(
+        &mut self,
+        _: &ToggleThread,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.update(cx, |editor, cx| {
+            editor.focused_editor().update(cx, |editor, cx| {
+                editor.toggle_pull_request_thread(cx);
+            });
+        });
+    }
+
+    fn toggle_all_pull_request_threads(
+        &mut self,
+        _: &ToggleAllThreads,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.update(cx, |editor, cx| {
+            editor.update_editors(cx, |editor, cx| {
+                editor.toggle_all_pull_request_threads(cx);
+            });
+        });
     }
 
     fn move_to_beginning(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1312,6 +1350,8 @@ impl Render for ProjectDiff {
             .when(is_branch_diff_view, |this| {
                 this.on_action(cx.listener(Self::review_diff))
                     .on_action(cx.listener(Self::toggle_viewed_for_active_path))
+                    .on_action(cx.listener(Self::toggle_pull_request_thread))
+                    .on_action(cx.listener(Self::toggle_all_pull_request_threads))
             })
             .bg(cx.theme().colors().editor_background)
             .flex()

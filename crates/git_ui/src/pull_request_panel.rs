@@ -26,8 +26,6 @@ actions!(
         Refresh,
         /// Toggles the selected pull request file's viewed state on GitHub.
         ToggleViewed,
-        /// Opens the selected pull request comment or file on GitHub.
-        ViewInGithub,
     ]
 );
 
