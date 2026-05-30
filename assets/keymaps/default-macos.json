@@ -1204,6 +1204,14 @@
     },
   },
   {
+    "context": "PullRequestPicker > Picker > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "tab": "pull_request_picker::NextPullRequestFilter",
+      "shift-tab": "pull_request_picker::PreviousPullRequestFilter",
+    },
+  },
+  {
     "context": "ChannelModal > Picker > Editor",
     "use_key_equivalents": true,
     "bindings": {

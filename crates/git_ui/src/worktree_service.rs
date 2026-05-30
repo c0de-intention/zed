@@ -90,7 +90,10 @@ struct WorktreeFetchFailedToast {
     workspace: WeakEntity<Workspace>,
     worktree_name: Option<String>,
     branch_target: NewWorktreeBranchTarget,
+    attached_branch_name: Option<String>,
     focused_dock: Option<DockPosition>,
+    open_mode: OpenMode,
+    activate: bool,
     remote_branch_name: String,
     operation: SharedString,
     output: String,
@@ -102,7 +105,10 @@ impl WorktreeFetchFailedToast {
         workspace: WeakEntity<Workspace>,
         worktree_name: Option<String>,
         branch_target: NewWorktreeBranchTarget,
+        attached_branch_name: Option<String>,
         focused_dock: Option<DockPosition>,
+        open_mode: OpenMode,
+        activate: bool,
         fetch_error: &WorktreeFetchError,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
@@ -110,7 +116,10 @@ impl WorktreeFetchFailedToast {
             workspace,
             worktree_name,
             branch_target,
+            attached_branch_name,
             focused_dock,
+            open_mode,
+            activate,
             remote_branch_name: fetch_error.remote_branch_name(),
             operation: format!("fetch {}", fetch_error.remote_name).into(),
             output: fetch_error.output(),
@@ -142,7 +151,10 @@ impl Render for WorktreeFetchFailedToast {
         let workspace_for_retry = self.workspace.clone();
         let worktree_name = self.worktree_name.clone();
         let branch_target = self.branch_target.clone();
+        let attached_branch_name = self.attached_branch_name.clone();
         let focused_dock = self.focused_dock;
+        let open_mode = self.open_mode;
+        let activate = self.activate;
 
         let workspace_for_log = self.workspace.clone();
         let operation = self.operation.clone();
@@ -183,11 +195,12 @@ impl Render for WorktreeFetchFailedToast {
                                     worktree_name: worktree_name.clone(),
                                     branch_target: branch_target.clone(),
                                 },
+                                attached_branch_name.clone(),
                                 window,
                                 focused_dock,
                                 RemoteBranchFetchMode::UseLocal,
-                                // User-initiated retry of a foreground create.
-                                true,
+                                open_mode,
+                                activate,
                                 cx,
                             );
                             task.detach_and_log_err(cx);
@@ -367,6 +380,7 @@ fn start_worktree_creations(
     existing_worktree_names: &[String],
     existing_worktree_paths: &HashSet<PathBuf>,
     base_ref: Option<String>,
+    attached_branch_name: Option<String>,
     worktree_directory_setting: &str,
     rng: &mut impl rand::Rng,
     cx: &mut gpui::App,
@@ -402,8 +416,24 @@ fn start_worktree_creations(
             let receiver = if scheduled_paths.contains(&new_path) {
                 None
             } else {
-                let target = git::repository::CreateWorktreeTarget::Detached {
-                    base_sha: base_ref.clone(),
+                let target = if let Some(branch_name) = attached_branch_name.clone() {
+                    let local_ref_name = format!("refs/heads/{branch_name}");
+                    let local_branch_exists = repo
+                        .branch_list
+                        .iter()
+                        .any(|branch| branch.ref_name.as_ref() == local_ref_name);
+                    if local_branch_exists {
+                        git::repository::CreateWorktreeTarget::ExistingBranch { branch_name }
+                    } else {
+                        git::repository::CreateWorktreeTarget::NewBranch {
+                            branch_name,
+                            base_sha: base_ref.clone(),
+                        }
+                    }
+                } else {
+                    git::repository::CreateWorktreeTarget::Detached {
+                        base_sha: base_ref.clone(),
+                    }
                 };
                 Some(repo.create_worktree(target, new_path.clone()))
             };
@@ -596,10 +626,62 @@ pub fn handle_create_worktree(
     let task = create_worktree_workspace_inner(
         workspace,
         action,
+        None,
         window,
         fallback_focused_dock,
         RemoteBranchFetchMode::Fetch,
-        // The user explicitly asked to create a worktree, so foreground it.
+        OpenMode::Add,
+        true,
+        cx,
+    );
+    task.detach_and_log_err(cx);
+}
+
+pub fn handle_create_worktree_in_new_window(
+    workspace: &mut Workspace,
+    action: &zed_actions::CreateWorktree,
+    window: &mut gpui::Window,
+    fallback_focused_dock: Option<DockPosition>,
+    cx: &mut gpui::Context<Workspace>,
+) {
+    let task = create_worktree_workspace_inner(
+        workspace,
+        action,
+        None,
+        window,
+        fallback_focused_dock,
+        RemoteBranchFetchMode::Fetch,
+        OpenMode::NewWindow,
+        true,
+        cx,
+    );
+    task.detach_and_log_err(cx);
+}
+
+pub fn handle_create_branch_worktree_in_new_window(
+    workspace: &mut Workspace,
+    worktree_name: String,
+    remote_name: String,
+    branch_name: String,
+    window: &mut gpui::Window,
+    fallback_focused_dock: Option<DockPosition>,
+    cx: &mut gpui::Context<Workspace>,
+) {
+    let action = zed_actions::CreateWorktree {
+        worktree_name: Some(worktree_name),
+        branch_target: zed_actions::NewWorktreeBranchTarget::RemoteBranch {
+            remote_name,
+            branch_name: branch_name.clone(),
+        },
+    };
+    let task = create_worktree_workspace_inner(
+        workspace,
+        &action,
+        Some(branch_name),
+        window,
+        fallback_focused_dock,
+        RemoteBranchFetchMode::Fetch,
+        OpenMode::NewWindow,
         true,
         cx,
     );
@@ -644,9 +726,11 @@ pub fn create_worktree_workspace(
     create_worktree_workspace_inner(
         workspace,
         action,
+        None,
         window,
         fallback_focused_dock,
         RemoteBranchFetchMode::Fetch,
+        OpenMode::Add,
         // Agent-created worktree workspaces open in the background.
         false,
         cx,
@@ -656,9 +740,11 @@ pub fn create_worktree_workspace(
 fn create_worktree_workspace_inner(
     workspace: &mut Workspace,
     action: &zed_actions::CreateWorktree,
+    attached_branch_name: Option<String>,
     window: &mut gpui::Window,
     fallback_focused_dock: Option<DockPosition>,
     remote_branch_fetch_mode: RemoteBranchFetchMode,
+    open_mode: OpenMode,
     activate: bool,
     cx: &mut gpui::Context<Workspace>,
 ) -> Task<anyhow::Result<CreatedWorktreeWorkspace>> {
@@ -756,12 +842,14 @@ fn create_worktree_workspace_inner(
             non_git_paths,
             worktree_name.clone(),
             branch_target.clone(),
+            attached_branch_name.clone(),
             fetch_askpass_delegates,
             remote_branch_fetch_mode,
             previous_state,
             workspace_handle.clone(),
             window_handle,
             remote_connection_options,
+            open_mode,
             activate,
             &mut cx,
         )
@@ -778,7 +866,10 @@ fn create_worktree_workspace_inner(
                                 workspace.weak_handle(),
                                 worktree_name,
                                 branch_target,
+                                attached_branch_name,
                                 fallback_focused_dock,
+                                open_mode,
+                                activate,
                                 fetch_error,
                                 cx,
                             )
@@ -870,12 +961,14 @@ async fn do_create_worktree(
     non_git_paths: Vec<PathBuf>,
     worktree_name: Option<String>,
     branch_target: NewWorktreeBranchTarget,
+    attached_branch_name: Option<String>,
     fetch_askpass_delegates: Vec<AskPassDelegate>,
     remote_branch_fetch_mode: RemoteBranchFetchMode,
     previous_state: PreviousWorkspaceState,
     workspace: WeakEntity<Workspace>,
     window_handle: Option<gpui::WindowHandle<MultiWorkspace>>,
     remote_connection_options: Option<RemoteConnectionOptions>,
+    open_mode: OpenMode,
     activate: bool,
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<CreatedWorktreeWorkspace> {
@@ -950,6 +1043,7 @@ async fn do_create_worktree(
             &existing_worktree_names,
             &existing_worktree_paths,
             base_ref,
+            attached_branch_name,
             &worktree_directory_setting,
             &mut rng,
             cx,
@@ -980,6 +1074,7 @@ async fn do_create_worktree(
         window_handle,
         remote_connection_options,
         WorktreeOperation::Create,
+        open_mode,
         activate,
         cx,
     )
@@ -1020,7 +1115,7 @@ async fn do_switch_worktree(
         window_handle,
         remote_connection_options,
         WorktreeOperation::Switch,
-        // Switching is always an explicit, foreground user action.
+        OpenMode::Add,
         true,
         cx,
     )
@@ -1040,6 +1135,7 @@ async fn open_worktree_workspace(
     window_handle: Option<gpui::WindowHandle<MultiWorkspace>>,
     remote_connection_options: Option<RemoteConnectionOptions>,
     operation: WorktreeOperation,
+    open_mode: OpenMode,
     activate: bool,
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<Entity<Workspace>> {
@@ -1057,7 +1153,7 @@ async fn open_worktree_workspace(
     // a freshly-created worktree for the user.
     let transfer_state = is_creating_new_worktree && activate;
 
-    let source_for_transfer = if transfer_state {
+    let source_for_transfer = if transfer_state && open_mode != OpenMode::NewWindow {
         Some(workspace.clone())
     } else {
         None
@@ -1101,7 +1197,7 @@ async fn open_worktree_workspace(
                 },
                 &[],
                 init,
-                OpenMode::Add,
+                open_mode,
                 source_for_transfer.clone(),
                 window,
                 cx,
@@ -1254,7 +1350,7 @@ async fn open_worktree_workspace(
         if is_creating_new_worktree {
             new_workspace.update(cx, |workspace, cx| {
                 // Run create-worktree setup hooks regardless of foreground vs
-                // background — the worktree was created either way.
+                // background; the worktree was created either way.
                 workspace.run_create_worktree_tasks(window, cx);
 
                 if activate && let Some(dock_position) = focused_dock {

@@ -1150,6 +1150,13 @@
     },
   },
   {
+    "context": "PullRequestPicker > Picker > Editor",
+    "bindings": {
+      "tab": "pull_request_picker::NextPullRequestFilter",
+      "shift-tab": "pull_request_picker::PreviousPullRequestFilter",
+    },
+  },
+  {
     "context": "ChannelModal > Picker > Editor",
     "bindings": {
       "tab": "channel_modal::ToggleMode",
