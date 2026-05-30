@@ -108,8 +108,8 @@ pub use element::{
 pub use git::blame::BlameRenderer;
 pub(crate) use git::{DiffHunkKey, StoredReviewComment};
 use git::{
-    DiffReviewDragState, DiffReviewOverlay, InlineBlamePopover, render_diff_hunk_controls,
-    update_uncommitted_diff_for_buffer,
+    DiffReviewDragState, DiffReviewOverlay, InlineBlamePopover, PullRequestThreadBlock,
+    render_diff_hunk_controls, update_uncommitted_diff_for_buffer,
 };
 pub(crate) use git::{DisplayDiffHunk, PhantomDiffReviewIndicator};
 pub use git::{PullRequestCommentThread, PullRequestFileLink};
@@ -1113,6 +1113,7 @@ pub struct Editor {
     next_review_comment_id: usize,
     pull_request_file_links: Vec<PullRequestFileLink>,
     pull_request_comment_threads: Vec<PullRequestCommentThread>,
+    pub(crate) open_pull_request_threads: Vec<PullRequestThreadBlock>,
     hovered_diff_hunk_row: Option<DisplayRow>,
     pull_diagnostics_task: Task<()>,
     in_project_search: bool,
@@ -2302,6 +2303,7 @@ impl Editor {
             next_review_comment_id: 0,
             pull_request_file_links: Vec::new(),
             pull_request_comment_threads: Vec::new(),
+            open_pull_request_threads: Vec::new(),
             hovered_diff_hunk_row: None,
             _subscriptions: (!is_minimap)
                 .then(|| {

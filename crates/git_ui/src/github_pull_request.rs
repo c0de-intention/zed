@@ -22,6 +22,8 @@ pub struct PullRequestComment {
     pub original_start_line: Option<u32>,
     pub original_line: Option<u32>,
     pub url: String,
+    pub body: String,
+    pub author: Option<String>,
 }
 
 async fn gh_output(work_directory: Arc<Path>, args: Vec<String>) -> anyhow::Result<String> {
@@ -209,6 +211,16 @@ pub async fn fetch_pull_request_files(
         comments.extend(nodes.iter().filter_map(|node| {
             let path = node.get("path")?.as_str()?.to_string();
             let url = node.get("html_url")?.as_str()?.to_string();
+            let body = node
+                .get("body")
+                .and_then(|body| body.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let author = node
+                .get("user")
+                .and_then(|user| user.get("login"))
+                .and_then(|login| login.as_str())
+                .map(ToOwned::to_owned);
             let line = node
                 .get("line")
                 .and_then(|line| line.as_u64())
@@ -232,6 +244,8 @@ pub async fn fetch_pull_request_files(
                 original_start_line,
                 original_line,
                 url,
+                body,
+                author,
             })
         }));
         page += 1;
