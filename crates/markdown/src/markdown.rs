@@ -1112,6 +1112,7 @@ pub enum AutoscrollBehavior {
 pub struct MarkdownElement {
     markdown: Entity<Markdown>,
     style: MarkdownStyle,
+    key_context: Option<&'static str>,
     code_block_renderer: CodeBlockRenderer,
     on_url_click: Option<Box<dyn Fn(SharedString, &mut Window, &mut App)>>,
     code_span_link: Option<CodeSpanLinkCallback>,
@@ -1127,6 +1128,7 @@ impl MarkdownElement {
         Self {
             markdown,
             style,
+            key_context: None,
             code_block_renderer: CodeBlockRenderer::Default {
                 copy_button_visibility: CopyButtonVisibility::VisibleOnHover,
                 wrap_button_visibility: WrapButtonVisibility::Hidden,
@@ -1140,6 +1142,11 @@ impl MarkdownElement {
             show_root_block_markers: false,
             autoscroll: AutoscrollBehavior::Propagate,
         }
+    }
+
+    pub fn key_context(mut self, key_context: &'static str) -> Self {
+        self.key_context = Some(key_context);
+        self
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -2483,6 +2490,9 @@ impl Element for MarkdownElement {
         cx: &mut App,
     ) {
         let mut context = KeyContext::default();
+        if let Some(key_context) = self.key_context {
+            context.add(key_context);
+        }
         context.add("Markdown");
         window.set_key_context(context);
         window.on_action(std::any::TypeId::of::<crate::Copy>(), {
