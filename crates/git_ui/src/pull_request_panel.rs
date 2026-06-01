@@ -1,16 +1,17 @@
 use crate::git_panel::GitPanel;
 use crate::git_panel_settings::GitPanelSettings;
+use crate::pull_request::{Details, status_summary};
 use gpui::{
     Action, AnyElement, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
     Focusable, IntoElement, KeyContext, ParentElement, Render, Styled, WeakEntity, Window, actions,
-    div,
+    div, rems,
 };
 use panel::PanelHeader;
 use project::ProjectPath;
 use settings::Settings;
 use ui::{
-    Button, ButtonStyle, Chip, Color, Icon, IconButton, IconName, IconSize, Label, LabelSize,
-    SpinnerLabel, Tab, Tooltip, prelude::*,
+    Button, ButtonStyle, Chip, Color, Icon, IconButton, IconName, IconSize, Label,
+    LabelCommon as _, LabelSize, SpinnerLabel, Tab, Tooltip, prelude::*,
 };
 use workspace::{
     Workspace,
@@ -36,6 +37,7 @@ pub fn register(workspace: &mut Workspace) {
             panel.update(cx, |panel, cx| {
                 panel.refresh(window, cx);
             });
+            crate::pull_request::open_or_focus_details_from_panel(workspace, true, window, cx);
         }
     });
 }
@@ -65,10 +67,17 @@ impl PullRequestPanel {
         })
     }
 
-    fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.panel.update(cx, |panel, cx| {
             panel.open_pull_request_view(window, cx);
         });
+    }
+
+    pub(crate) fn details_content(
+        &self,
+        cx: &App,
+    ) -> Option<crate::pull_request::PullRequestDetailsContent> {
+        self.panel.read(cx).details_content(cx)
     }
 
     fn refresh_action(&mut self, _: &Refresh, window: &mut Window, cx: &mut Context<Self>) {
@@ -205,6 +214,10 @@ impl GitPanel {
             && has_entries
         {
             panel
+                .when_some(
+                    self.render_pull_request_description(cx),
+                    |this, description| this.child(description),
+                )
                 .child(self.render_entries(has_write_access, repo, window, cx))
                 .into_any_element()
         } else {
@@ -293,6 +306,85 @@ impl GitPanel {
             )
     }
 
+    fn render_pull_request_description(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let body = self.pull_request_body()?;
+        let title = self
+            .pull_request_title()
+            .unwrap_or_else(|| "Pull Request".into());
+        let details_button = IconButton::new("pull-request-details", IconName::FileDoc)
+            .icon_size(IconSize::Small)
+            .tooltip(|_window, cx| Tooltip::for_action("Pull Request Details", &Details, cx))
+            .on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(Details), cx);
+            });
+        let review_count = self.pull_request_review_request_count();
+        let review_status = if review_count == 0 {
+            self.pull_request_review_decision()
+                .as_ref()
+                .map(|status| format!("Review: {status}"))
+                .unwrap_or_else(|| "No reviewers".to_string())
+        } else {
+            format!("{review_count} reviewer(s)")
+        };
+        let checks_status = status_summary(self.pull_request_status_checks());
+        let checks_color = pull_request_panel_checks_color(self.pull_request_status_checks());
+        let checks_icon = pull_request_panel_checks_icon(self.pull_request_status_checks());
+
+        Some(
+            v_flex()
+                .flex_basis(gpui::relative(0.25))
+                .min_h(rems(6.))
+                .max_h(rems(14.))
+                .border_b_1()
+                .border_color(cx.theme().colors().border)
+                .p_2()
+                .gap_1()
+                .overflow_hidden()
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .gap_2()
+                        .child(Label::new(title).size(LabelSize::Small).truncate())
+                        .child(details_button),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(Icon::new(IconName::UserCheck).color(Color::Muted))
+                                .child(
+                                    Label::new(review_status)
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(Icon::new(checks_icon).color(checks_color))
+                                .child(
+                                    Label::new(checks_status)
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                ),
+                        ),
+                )
+                .child(
+                    Label::new(if body.trim().is_empty() {
+                        "No description".into()
+                    } else {
+                        body.clone()
+                    })
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .truncate(),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_warning_chip(
         &self,
         label: &'static str,
@@ -365,4 +457,38 @@ impl GitPanel {
             .child("No pull request changes")
             .into_any_element()
     }
+}
+
+fn pull_request_panel_checks_icon(
+    status_checks: &[crate::github_pull_request::PullRequestStatusCheck],
+) -> IconName {
+    if status_checks.is_empty() {
+        return IconName::CircleHelp;
+    }
+    let failed = status_checks.iter().any(|check| {
+        check
+            .conclusion
+            .as_deref()
+            .is_some_and(|conclusion| !matches!(conclusion, "SUCCESS" | "SKIPPED" | "NEUTRAL"))
+    });
+    if failed {
+        IconName::XCircle
+    } else {
+        IconName::Check
+    }
+}
+
+fn pull_request_panel_checks_color(
+    status_checks: &[crate::github_pull_request::PullRequestStatusCheck],
+) -> Color {
+    if status_checks.is_empty() {
+        return Color::Muted;
+    }
+    let failed = status_checks.iter().any(|check| {
+        check
+            .conclusion
+            .as_deref()
+            .is_some_and(|conclusion| !matches!(conclusion, "SUCCESS" | "SKIPPED" | "NEUTRAL"))
+    });
+    if failed { Color::Error } else { Color::Success }
 }

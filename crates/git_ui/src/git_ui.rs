@@ -45,6 +45,7 @@ mod github_pull_request;
 pub mod multi_diff_view;
 pub mod picker_prompt;
 pub mod project_diff;
+pub mod pull_request;
 pub mod pull_request_panel;
 pub mod pull_request_picker;
 pub(crate) mod remote_output;
@@ -93,6 +94,7 @@ pub fn init(cx: &mut App) {
         ProjectDiff::register(workspace, cx);
         CommitModal::register(workspace);
         git_panel::register(workspace);
+        pull_request::register(workspace);
         pull_request_panel::register(workspace);
         pull_request_picker::register(workspace);
         repository_selector::register(workspace);

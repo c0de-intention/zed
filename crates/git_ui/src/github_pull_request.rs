@@ -1,12 +1,41 @@
 use anyhow::Context as _;
+use futures_lite::io::AsyncWriteExt as _;
 use std::{path::Path, process::Stdio, sync::Arc};
 
 pub struct PullRequestFiles {
     pub id: String,
+    pub number: u32,
     pub title: String,
     pub url: String,
+    pub body: String,
+    pub review_decision: Option<String>,
+    pub review_requests: Vec<PullRequestReviewer>,
+    pub status_checks: Vec<PullRequestStatusCheck>,
     pub files: Vec<PullRequestFile>,
     pub comments: Vec<PullRequestComment>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PullRequestDetails {
+    pub number: u32,
+    pub title: String,
+    pub url: String,
+    pub body: String,
+    pub review_decision: Option<String>,
+    pub review_requests: Vec<PullRequestReviewer>,
+    pub status_checks: Vec<PullRequestStatusCheck>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PullRequestReviewer {
+    pub login: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct PullRequestStatusCheck {
+    pub name: String,
+    pub status: Option<String>,
+    pub conclusion: Option<String>,
 }
 
 pub struct PullRequestFile {
@@ -45,6 +74,36 @@ async fn gh_output(work_directory: Arc<Path>, args: Vec<String>) -> anyhow::Resu
         .await
         .context("running gh")?;
 
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("gh exited with status {}: {}", output.status, stderr.trim());
+    }
+
+    String::from_utf8(output.stdout).context("decoding gh output")
+}
+
+async fn gh_output_with_input(
+    work_directory: Arc<Path>,
+    args: Vec<String>,
+    input: String,
+) -> anyhow::Result<String> {
+    let mut child = smol::process::Command::new("gh")
+        .args(args)
+        .current_dir(work_directory.as_ref())
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("running gh")?;
+
+    let mut stdin = child.stdin.take().context("opening gh stdin")?;
+    stdin
+        .write_all(input.as_bytes())
+        .await
+        .context("writing gh stdin")?;
+    drop(stdin);
+
+    let output = child.output().await.context("waiting for gh")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("gh exited with status {}: {}", output.status, stderr.trim());
@@ -141,6 +200,80 @@ pub async fn open_current_pull_request_in_browser(work_directory: Arc<Path>) -> 
     Ok(())
 }
 
+pub async fn fetch_pull_request_template(work_directory: Arc<Path>) -> anyhow::Result<String> {
+    let template_paths = [
+        ".github/pull_request_template.md",
+        ".github/PULL_REQUEST_TEMPLATE.md",
+        "pull_request_template.md",
+        "PULL_REQUEST_TEMPLATE.md",
+    ];
+
+    for template_path in template_paths {
+        let path = work_directory.join(template_path);
+        match smol::fs::read_to_string(&path).await {
+            Ok(template) => return Ok(template),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("reading pull request template {}", path.display()));
+            }
+        }
+    }
+
+    Ok(String::new())
+}
+
+pub async fn create_pull_request(
+    work_directory: Arc<Path>,
+    body: String,
+) -> anyhow::Result<String> {
+    gh_output_with_input(
+        work_directory,
+        vec![
+            "pr".into(),
+            "create".into(),
+            "--fill".into(),
+            "--body-file".into(),
+            "-".into(),
+        ],
+        body,
+    )
+    .await
+    .context("creating pull request")
+}
+
+pub async fn update_current_pull_request_body(
+    work_directory: Arc<Path>,
+    body: String,
+) -> anyhow::Result<String> {
+    gh_output_with_input(
+        work_directory,
+        vec!["pr".into(), "edit".into(), "--body-file".into(), "-".into()],
+        body,
+    )
+    .await
+    .context("updating pull request description")
+}
+
+pub async fn fetch_pull_request_details(
+    work_directory: Arc<Path>,
+) -> anyhow::Result<PullRequestDetails> {
+    let pull_request_json = gh_output(
+        work_directory,
+        vec![
+            "pr".into(),
+            "view".into(),
+            "--json".into(),
+            "number,title,url,body,reviewDecision,reviewRequests,statusCheckRollup".into(),
+        ],
+    )
+    .await
+    .context("loading pull request details")?;
+    let pull_request: serde_json::Value =
+        serde_json::from_str(&pull_request_json).context("parsing pull request details JSON")?;
+    parse_pull_request_details(&pull_request)
+}
+
 pub async fn fetch_pull_request_files(
     work_directory: Arc<Path>,
 ) -> anyhow::Result<PullRequestFiles> {
@@ -150,7 +283,7 @@ pub async fn fetch_pull_request_files(
             "pr".into(),
             "view".into(),
             "--json".into(),
-            "id,number,title,url".into(),
+            "id,number,title,url,body,reviewDecision,reviewRequests,statusCheckRollup".into(),
         ],
     )
     .await
@@ -164,7 +297,8 @@ pub async fn fetch_pull_request_files(
         .to_string();
     let pull_request_number = pull_request
         .get("number")
-        .and_then(|number| number.as_i64())
+        .and_then(|number| number.as_u64())
+        .and_then(|number| u32::try_from(number).ok())
         .context("pull request number missing")?;
     let pull_request_title = pull_request
         .get("title")
@@ -176,6 +310,18 @@ pub async fn fetch_pull_request_files(
         .and_then(|url| url.as_str())
         .context("pull request url missing")?
         .to_string();
+    let body = pull_request
+        .get("body")
+        .and_then(|body| body.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let review_decision = pull_request
+        .get("reviewDecision")
+        .and_then(|review_decision| review_decision.as_str())
+        .filter(|review_decision| !review_decision.is_empty())
+        .map(ToOwned::to_owned);
+    let review_requests = parse_review_requests(pull_request.get("reviewRequests"));
+    let status_checks = parse_status_checks(pull_request.get("statusCheckRollup"));
 
     let repository_json = gh_output(
         work_directory.clone(),
@@ -350,11 +496,105 @@ pub async fn fetch_pull_request_files(
 
     Ok(PullRequestFiles {
         id: pull_request_id,
+        number: pull_request_number,
         title: pull_request_title,
         url: pull_request_url,
+        body,
+        review_decision,
+        review_requests,
+        status_checks,
         files,
         comments,
     })
+}
+
+fn parse_pull_request_details(
+    pull_request: &serde_json::Value,
+) -> anyhow::Result<PullRequestDetails> {
+    let number = pull_request
+        .get("number")
+        .and_then(|number| number.as_u64())
+        .and_then(|number| u32::try_from(number).ok())
+        .context("pull request number missing")?;
+    let title = pull_request
+        .get("title")
+        .and_then(|title| title.as_str())
+        .context("pull request title missing")?
+        .to_string();
+    let url = pull_request
+        .get("url")
+        .and_then(|url| url.as_str())
+        .context("pull request url missing")?
+        .to_string();
+    let body = pull_request
+        .get("body")
+        .and_then(|body| body.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let review_decision = pull_request
+        .get("reviewDecision")
+        .and_then(|review_decision| review_decision.as_str())
+        .filter(|review_decision| !review_decision.is_empty())
+        .map(ToOwned::to_owned);
+    let review_requests = parse_review_requests(pull_request.get("reviewRequests"));
+    let status_checks = parse_status_checks(pull_request.get("statusCheckRollup"));
+
+    Ok(PullRequestDetails {
+        number,
+        title,
+        url,
+        body,
+        review_decision,
+        review_requests,
+        status_checks,
+    })
+}
+
+fn parse_review_requests(review_requests: Option<&serde_json::Value>) -> Vec<PullRequestReviewer> {
+    review_requests
+        .and_then(|review_requests| review_requests.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|node| {
+            let login = node
+                .get("login")
+                .or_else(|| node.get("slug"))
+                .or_else(|| node.get("name"))
+                .and_then(|login| login.as_str())?
+                .to_string();
+            Some(PullRequestReviewer { login })
+        })
+        .collect()
+}
+
+fn parse_status_checks(
+    status_check_rollup: Option<&serde_json::Value>,
+) -> Vec<PullRequestStatusCheck> {
+    status_check_rollup
+        .and_then(|rollup| rollup.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|node| {
+            let name = node
+                .get("name")
+                .or_else(|| node.get("context"))
+                .and_then(|name| name.as_str())?
+                .to_string();
+            let status = node
+                .get("status")
+                .and_then(|status| status.as_str())
+                .map(ToOwned::to_owned);
+            let conclusion = node
+                .get("conclusion")
+                .and_then(|conclusion| conclusion.as_str())
+                .map(ToOwned::to_owned);
+            Some(PullRequestStatusCheck {
+                name,
+                status,
+                conclusion,
+            })
+        })
+        .collect()
 }
 
 pub fn is_pull_request_not_found_error(error: &anyhow::Error) -> bool {

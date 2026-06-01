@@ -5284,6 +5284,7 @@ mod tests {
                 "project_search",
                 "project_symbols",
                 "projects",
+                "pull_request",
                 "pull_request_panel",
                 "pull_request_picker",
                 "recent_projects",

@@ -4,10 +4,13 @@ use crate::commit_tooltip::{CommitAvatar, CommitTooltip};
 use crate::commit_view::CommitView;
 use crate::git_panel_settings::GitPanelScrollbarAccessor;
 use crate::github_pull_request::{
-    PullRequestComment, fetch_pull_request_files, is_pull_request_not_found_error,
-    set_pull_request_file_viewed,
+    PullRequestComment, PullRequestDetails, PullRequestReviewer, PullRequestStatusCheck,
+    fetch_pull_request_files, is_pull_request_not_found_error, set_pull_request_file_viewed,
 };
 use crate::project_diff::{self, BranchDiff, Diff, ProjectDiff};
+use crate::pull_request::{
+    PullRequestDetailsComment, PullRequestDetailsContent, PullRequestDetailsView,
+};
 use crate::pull_request_panel::{Refresh as RefreshPullRequest, ToggleViewed};
 use crate::remote_output::{self, RemoteAction, SuccessMessage};
 use crate::solo_diff_view::SoloDiffView;
@@ -20,7 +23,6 @@ use anyhow::Context as _;
 use askpass::AskPassDelegate;
 use collections::{BTreeMap, HashMap, HashSet};
 use db::kvp::KeyValueStore;
-use editor::{Editor, EditorElement, EditorMode, MultiBuffer, MultiBufferOffset, SizingBehavior};
 use editor::{
     Editor, EditorElement, EditorMode, MultiBuffer, MultiBufferOffset, PullRequestCommentThread,
     PullRequestFileLink, SizingBehavior,
@@ -804,7 +806,12 @@ pub struct GitPanel {
     pull_request_comments: HashMap<RepoPath, Vec<PullRequestCommentState>>,
     pull_request_url: Option<SharedString>,
     pull_request_id: Option<String>,
+    pull_request_number: Option<u32>,
     pull_request_title: Option<SharedString>,
+    pull_request_body: Option<SharedString>,
+    pull_request_review_decision: Option<SharedString>,
+    pull_request_review_requests: Vec<PullRequestReviewer>,
+    pull_request_status_checks: Vec<PullRequestStatusCheck>,
     pull_request_status: Option<SharedString>,
     pull_request_loading: bool,
     pull_request_not_found: bool,
@@ -1030,7 +1037,12 @@ impl GitPanel {
                 pull_request_comments: HashMap::default(),
                 pull_request_url: None,
                 pull_request_id: None,
+                pull_request_number: None,
                 pull_request_title: None,
+                pull_request_body: None,
+                pull_request_review_decision: None,
+                pull_request_review_requests: Vec::new(),
+                pull_request_status_checks: Vec::new(),
                 pull_request_status: None,
                 pull_request_loading: false,
                 pull_request_not_found: false,
@@ -1140,8 +1152,14 @@ impl GitPanel {
         self.pull_request_comments.clear();
         self.pull_request_url.take();
         self.pull_request_id.take();
+        self.pull_request_number.take();
         self.pull_request_title.take();
+        self.pull_request_body.take();
+        self.pull_request_review_decision.take();
+        self.pull_request_review_requests.clear();
+        self.pull_request_status_checks.clear();
         cx.notify();
+        self.update_open_pull_request_details(cx);
 
         let project = self.project.clone();
         let default_branch =
@@ -1178,7 +1196,6 @@ impl GitPanel {
                     this.pull_request_branch_diff_subscription = Some(subscription);
                     this.pull_request_status = Some(format!("Changes since {base_ref}").into());
                     this.update_visible_entries(window, cx);
-                    window.dispatch_action(BranchDiff.boxed_clone(), cx);
                     this.load_pull_request_viewed_state(window, cx);
                 })?;
 
@@ -1226,8 +1243,14 @@ impl GitPanel {
                     this.pull_request_loading = false;
                     this.pull_request_not_found = false;
                     this.pull_request_id = Some(pull_request.id);
+                    this.pull_request_number = Some(pull_request.number);
                     this.pull_request_title = Some(pull_request.title.into());
                     this.pull_request_url = Some(pull_request.url.into());
+                    this.pull_request_body = Some(pull_request.body.into());
+                    this.pull_request_review_decision =
+                        pull_request.review_decision.map(Into::into);
+                    this.pull_request_review_requests = pull_request.review_requests;
+                    this.pull_request_status_checks = pull_request.status_checks;
                     this.pull_request_files = pull_request
                         .files
                         .into_iter()
@@ -1244,6 +1267,7 @@ impl GitPanel {
                     this.pull_request_comments =
                         Self::pull_request_comments_by_path(pull_request.comments);
                     this.update_pull_request_comment_threads(cx);
+                    this.update_open_pull_request_details(cx);
                     this.pull_request_status = None;
                     cx.notify();
                 }
@@ -1252,16 +1276,23 @@ impl GitPanel {
                     if is_pull_request_not_found_error(&error) {
                         this.pull_request_not_found = true;
                         this.pull_request_id.take();
+                        this.pull_request_number.take();
                         this.pull_request_title.take();
                         this.pull_request_url.take();
+                        this.pull_request_body.take();
+                        this.pull_request_review_decision.take();
+                        this.pull_request_review_requests.clear();
+                        this.pull_request_status_checks.clear();
                         this.pull_request_files.clear();
                         this.pull_request_comments.clear();
                         this.update_pull_request_comment_threads(cx);
+                        this.update_open_pull_request_details(cx);
                         this.pull_request_status = None;
                     } else {
                         this.pull_request_status =
                             Some(format!("GitHub viewed state unavailable: {error:#}").into());
                         this.show_pull_request_error("GitHub viewed state unavailable", error, cx);
+                        this.update_open_pull_request_details(cx);
                     }
                     cx.notify();
                 }
@@ -1479,6 +1510,61 @@ impl GitPanel {
         )
     }
 
+    pub(crate) fn details_content(&self, cx: &App) -> Option<PullRequestDetailsContent> {
+        if self.pull_request_not_found {
+            return Some(PullRequestDetailsContent::not_found());
+        }
+
+        let title = self.pull_request_title.as_ref()?.to_string();
+        let details = PullRequestDetails {
+            number: self.pull_request_number.unwrap_or_default(),
+            title,
+            url: self
+                .pull_request_url
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            body: self
+                .pull_request_body
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            review_decision: self
+                .pull_request_review_decision
+                .as_ref()
+                .map(ToString::to_string),
+            review_requests: self.pull_request_review_requests.clone(),
+            status_checks: self.pull_request_status_checks.clone(),
+        };
+        let comments = self
+            .pull_request_comment_threads(cx)
+            .iter()
+            .map(PullRequestDetailsComment::from_thread)
+            .collect::<Vec<_>>();
+        Some(PullRequestDetailsContent::loaded(details, comments))
+    }
+
+    fn update_open_pull_request_details(&self, cx: &mut Context<Self>) {
+        let content = self
+            .details_content(cx)
+            .unwrap_or_else(PullRequestDetailsContent::loading);
+        let workspace = self.workspace.clone();
+        cx.defer(move |cx| {
+            let Some(workspace) = workspace.upgrade() else {
+                return;
+            };
+            let Some(details) = workspace
+                .read(cx)
+                .item_of_type::<PullRequestDetailsView>(cx)
+            else {
+                return;
+            };
+            details.update(cx, |details, cx| {
+                details.replace_content(content, cx);
+            });
+        });
+    }
+
     fn update_pull_request_comment_threads(&self, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
@@ -1502,6 +1588,26 @@ impl GitPanel {
 
     pub(crate) fn pull_request_has_id(&self) -> bool {
         self.pull_request_id.is_some()
+    }
+
+    pub(crate) fn pull_request_title(&self) -> Option<SharedString> {
+        self.pull_request_title.clone()
+    }
+
+    pub(crate) fn pull_request_body(&self) -> Option<SharedString> {
+        self.pull_request_body.clone()
+    }
+
+    pub(crate) fn pull_request_review_decision(&self) -> Option<SharedString> {
+        self.pull_request_review_decision.clone()
+    }
+
+    pub(crate) fn pull_request_review_request_count(&self) -> usize {
+        self.pull_request_review_requests.len()
+    }
+
+    pub(crate) fn pull_request_status_checks(&self) -> &[PullRequestStatusCheck] {
+        self.pull_request_status_checks.as_slice()
     }
 
     fn toggle_viewed_for_repo_path(
